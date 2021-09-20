@@ -3,12 +3,13 @@
 
 @author: Mario Krapp
 """
-import json
+import io
 import os
 import pandas as pd
 import pickle
+import requests
 import sys
-import urllib.request
+from collections import Counter
 
 # https://stackoverflow.com/a/287944/1498309
 HEADER = '\033[95m'
@@ -108,8 +109,8 @@ class NOAAStudy:
             the name of the cache directory
         """
         url_base = f"https://www.ncdc.noaa.gov/paleo-search/study/search.json?NOAAStudyId={self.id}"
-        with urllib.request.urlopen(url_base) as f:
-            self.metadata = json.loads(f.read())['study'][0]
+        response = requests.get(url_base).json()
+        self.metadata = response['study'][0]
         if self.cache == True:
             self.metadata_to_pickle()
 
@@ -158,6 +159,53 @@ class NOAAStudy:
         with open(fnm_pkl,'wb') as f:
             pickle.dump([self.info,self.data],f)
 
+    def inspect_data(self):
+        """
+        Inspects the dataset and tries to infer tabular data
+        from the most common number of columns.
+        """
+        res = requests.get(self.info[1]).text.split("\n")
+        ncols = []
+        data = []
+        # reverse order
+        for r in res[::-1]:
+            ncols.append(len(r.split()))
+        # count occurences
+        c = Counter(len(r.split()) for r in res[::-1])
+        selection = "Select (try the most common): "
+        for col, count in c.most_common(3):
+            selection += f"[{col}]: {count} "
+        n = int(input(selection))
+        print(c[n])
+        # adapted from https://stackoverflow.com/a/40166843/1498309
+        count = 0
+        prev = 0
+        indexend = 0
+        for i in range(0,len(ncols)):
+            if ncols[i] == n:
+                count += 1
+            else:            
+                if count > prev:
+                    prev = count
+                    indexend = i
+                count = 0
+        idx = -indexend+1
+        print("Table header detected:")
+        print("\n".join(res[idx-5:idx-1]))
+        print("".join(["-"]*50))
+        print("\n".join(res[idx-1:idx+5]))
+        # put raw text back together
+        data_txt = "\n".join(res[idx:])
+        self.data = pd.read_csv(io.StringIO(data_txt),\
+                delim_whitespace=True,header=None,\
+                encoding_errors="ignore",na_values=-999.00)
+        # Let the user set names for the headerless columns
+        columns = []
+        for i in range(n):
+            name = input(f"Enter name of column [{i}]: ") or str(i)
+            columns.append(name)
+        self.data.columns = columns
+
     def get_data(self,n=-1):
         """
         Get dataset from NOAA request.
@@ -189,7 +237,14 @@ class NOAAStudy:
             self.ds_id = n
         suffix = self.info[1].split(".")[-1]
         if suffix == "txt":
-            self.data = pd.read_csv(self.info[1],sep="\t",comment="#",encoding_errors="ignore",na_values=-999.00)
+            try:
+                self.data = pd.read_csv(self.info[1],sep="\t",comment="#",encoding_errors="ignore",na_values=-999.00)
+                if (len(self.data.columns) == 1):
+                    print(f"{FAIL} Could not parse data file. Enter inspection mode.{ENDC}")
+                    self.inspect_data()
+            except:
+                print(f"{FAIL} Could not parse data file. Skipping.{ENDC}")
+                pass
         elif suffix == "csv":
             self.data = pd.read_csv(self.info[1],encoding_errors="ignore",na_values=-999.00)
         else:
